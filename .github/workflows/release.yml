@@ -76,8 +76,17 @@ jobs:
       - name: Install Android SDK packages
         if: steps.exists.outputs.exists == 'false'
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager --install \
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          sdkmanager="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$sdkmanager" ]; then
+            sdkmanager=$(find "$sdk_root/cmdline-tools" -name sdkmanager -type f | head -n 1)
+          fi
+          if [ -z "$sdkmanager" ] || [ ! -x "$sdkmanager" ]; then
+            echo "sdkmanager not found under $sdk_root" >&2
+            exit 1
+          fi
+          yes | "$sdkmanager" --licenses >/dev/null || true
+          "$sdkmanager" --install \
             "platforms;android-${{ steps.info.outputs.sdk }}" \
             "build-tools;${{ steps.info.outputs.build_tools }}" \
             "ndk;${{ steps.info.outputs.ndk }}"
