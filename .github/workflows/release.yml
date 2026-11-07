@@ -89,9 +89,6 @@ jobs:
           - suffix: store-google
             task: assembleStore_googleRelease
             dir: store_google
-          - suffix: store-google-work
-            task: assembleStore_google_workRelease
-            dir: store_google_work
           - suffix: store-threema
             task: assembleStore_threemaRelease
             dir: store_threema
@@ -101,12 +98,6 @@ jobs:
           - suffix: hms
             task: assembleHmsRelease
             dir: hms
-          - suffix: hms-work
-            task: assembleHms_workRelease
-            dir: hms_work
-          - suffix: onprem
-            task: assembleOnpremRelease
-            dir: onprem
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -168,7 +159,7 @@ jobs:
           # i.e. a `keystore` directory next to the repository checkout.
           dir="$GITHUB_WORKSPACE/../keystore"
           mkdir -p "$dir"
-          for name in threema threema_hms onprem; do
+          for name in threema threema_hms; do
             echo "$KEYSTORE_BASE64" | base64 -d > "$dir/$name.keystore"
             {
               echo "storePassword=$KEYSTORE_PASSWORD"
