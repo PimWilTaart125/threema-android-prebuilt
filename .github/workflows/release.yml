@@ -71,10 +71,39 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          cat > notes.md <<'EOF'
+          Automated build of all flavors. APKs are added as each flavor finishes building.
+
+          File names look like `threema-<flavor>-<architecture>.apk`. Pick one flavor and one architecture.
+
+          ## Flavor
+
+          | Flavor | What it is |
+          |--------|------------|
+          | `libre` | No proprietary code (F-Droid style). No Google or Huawei services, no self-updater, uses your system emoji. |
+          | `store-threema` | Threema Shop version, with proprietary push services and a self-updater. |
+          | `store-google` | Google Play Store version. |
+          | `hms` | Huawei AppGallery version. |
+          | `store-google-work`, `hms-work`, `onprem` | Threema Work / OnPrem versions. Only useful if your company uses Threema Work or runs an OnPrem server. |
+
+          ## Architecture
+
+          | Architecture | Use it on |
+          |--------------|-----------|
+          | `arm64-v8a` | Almost every phone from the last several years. This is the one to pick if unsure. |
+          | `armeabi-v7a` | Older 32-bit phones. |
+          | `x86`, `x86_64` | Emulators and some Chromebooks or tablets. |
+          | `universal` | Works everywhere, but is about twice as big. |
+
+          ## Signing
+
+          If the repository has signing secrets, the APKs are signed with that key. Otherwise each build is signed with a one-off key, so updating over an older build needs an uninstall first (back up your data).
+          EOF
+          sed -i 's/^          //' notes.md
           gh release create "${{ steps.info.outputs.tag }}" \
             --target "$GITHUB_SHA" \
             --title "Threema ${{ steps.info.outputs.name }}" \
-            --notes "Automated build of all flavors from commit $GITHUB_SHA. APKs are added as each flavor finishes building. The flavor is the last part of each file name, before .apk."
+            --notes-file notes.md
 
   build:
     needs: prepare
@@ -180,12 +209,40 @@ jobs:
       - name: Build APKs
         run: ./gradlew --no-daemon -PbuildUniversalApk ${{ matrix.task }}
 
+      # Gradle only signs the APKs when a keystore was set up above. Otherwise
+      # they come out as "*-unsigned.apk", which Android refuses to install, so
+      # sign them here with a one-off key.
+      - name: Sign APKs if needed
+        run: |
+          out=app/build/outputs/apk/${{ matrix.dir }}/release
+          if ! ls "$out"/*-unsigned.apk >/dev/null 2>&1; then
+            echo "APKs are already signed."
+            exit 0
+          fi
+          echo "::warning::APKs were unsigned, signing with a one-off key. Set the KEYSTORE_* secrets for a stable key."
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          apksigner="$sdk_root/build-tools/${{ needs.prepare.outputs.build_tools }}/apksigner"
+          pass=$(openssl rand -hex 16)
+          keytool -genkeypair -keystore "$RUNNER_TEMP/oneoff.jks" -alias oneoff \
+            -keyalg RSA -keysize 4096 -validity 10000 \
+            -storepass "$pass" -keypass "$pass" -dname "CN=Unofficial Threema build"
+          for f in "$out"/*-unsigned.apk; do
+            "$apksigner" sign --ks "$RUNNER_TEMP/oneoff.jks" --ks-key-alias oneoff \
+              --ks-pass "pass:$pass" --key-pass "pass:$pass" \
+              --out "${f%-unsigned.apk}.apk" "$f"
+            rm -f "$f" "${f%-unsigned.apk}.apk.idsig"
+          done
+          ls -l "$out"
+
+      # Final file name: threema-<flavor>-<architecture>.apk
       - name: Rename APKs
         run: |
           mkdir -p dist
           for f in app/build/outputs/apk/${{ matrix.dir }}/release/*.apk; do
             base=$(basename "$f" .apk)
-            cp "$f" "dist/${base}-${{ matrix.suffix }}.apk"
+            arch=${base#app-${{ matrix.dir }}-}
+            arch=${arch%-release*}
+            cp "$f" "dist/threema-${{ matrix.suffix }}-${arch}.apk"
           done
           ls -l dist
 
