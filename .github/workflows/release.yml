@@ -34,7 +34,9 @@ jobs:
           version=$(sed -n 's/^val appVersion = "\([^"]*\)".*/\1/p' "$gradle_file")
           suffix=$(sed -n 's/^val betaSuffix = "\([^"]*\)".*/\1/p' "$gradle_file")
           code=$(sed -n 's/^val defaultVersionCode = \([0-9]*\).*/\1/p' "$gradle_file")
-          sdk=$(sed -n 's/^ *compileSdk = \([0-9]*\).*/\1/p' "$gradle_file")
+          sdk_major=$(sed -n 's/^ *compileSdk = \([0-9]*\).*/\1/p' "$gradle_file")
+          sdk_minor=$(sed -n 's/^ *compileSdkMinor = \([0-9]*\).*/\1/p' "$gradle_file")
+          sdk="${sdk_major}.${sdk_minor:-0}"
           build_tools=$(sed -n 's/^ *buildToolsVersion = "\([^"]*\)".*/\1/p' "$gradle_file")
           ndk=$(sed -n 's/^ *ndkVersion = "\([^"]*\)".*/\1/p' "$gradle_file")
           rust=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' domain/libthreema/rust-toolchain.toml)
