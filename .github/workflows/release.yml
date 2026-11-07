@@ -74,7 +74,7 @@ jobs:
           cat > notes.md <<'EOF'
           Automated build of all flavors. APKs are added as each flavor finishes building.
 
-          File names look like `Threema-<version>-<flavor>-<architecture>.apk`. Pick one flavor and one architecture.
+          File names look like `threema-<flavor>-<architecture>.apk`. Pick one flavor and one architecture.
 
           ## Flavor
 
@@ -234,7 +234,7 @@ jobs:
           done
           ls -l "$out"
 
-      # Final file name: Threema-<version>-<flavor>-<architecture>.apk
+      # Final file name: threema-<flavor>-<architecture>.apk
       - name: Rename APKs
         run: |
           mkdir -p dist
@@ -242,7 +242,7 @@ jobs:
             base=$(basename "$f" .apk)
             arch=${base#app-${{ matrix.dir }}-}
             arch=${arch%-release*}
-            cp "$f" "dist/Threema-${{ needs.prepare.outputs.name }}-${{ matrix.suffix }}-${arch}.apk"
+            cp "$f" "dist/threema-${{ matrix.suffix }}-${arch}.apk"
           done
           ls -l dist
 
