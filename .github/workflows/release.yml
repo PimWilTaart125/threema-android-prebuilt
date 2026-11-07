@@ -64,6 +64,18 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # The release is created empty first; every flavor job then attaches its
+      # own APKs as soon as it finishes building.
+      - name: Create release
+        if: steps.exists.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.info.outputs.tag }}" \
+            --target "$GITHUB_SHA" \
+            --title "Threema ${{ steps.info.outputs.name }}" \
+            --notes "Automated build of all flavors from commit $GITHUB_SHA. APKs are added as each flavor finishes building. The flavor is the last part of each file name, before .apk."
+
   build:
     needs: prepare
     if: needs.prepare.outputs.exists == 'false'
@@ -177,37 +189,9 @@ jobs:
           done
           ls -l dist
 
-      - name: Upload APKs
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-${{ matrix.suffix }}
-          path: dist/*.apk
-          if-no-files-found: error
-
-  release:
-    needs: [prepare, build]
-    # Release whatever built successfully, even if one flavor failed.
-    if: ${{ !cancelled() && needs.prepare.outputs.exists == 'false' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download APKs
-        uses: actions/download-artifact@v4
-        with:
-          pattern: apk-*
-          path: dist
-          merge-multiple: true
-
-      - name: Create release
+      - name: Add APKs to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! ls dist/*.apk >/dev/null 2>&1; then
-            echo "No APKs were built, not creating a release." >&2
-            exit 1
-          fi
-          ls -l dist
-          gh release create "${{ needs.prepare.outputs.tag }}" dist/*.apk \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "Threema ${{ needs.prepare.outputs.name }}" \
-            --notes "Automated build of all flavors from commit $GITHUB_SHA. The flavor is the last part of each file name, before .apk."
+          gh release upload "${{ needs.prepare.outputs.tag }}" dist/*.apk \
+            --repo "$GITHUB_REPOSITORY" --clobber
