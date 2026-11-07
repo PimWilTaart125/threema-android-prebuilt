@@ -1,0 +1,144 @@
+name: Build and release APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Product flavor to build (see "Build Variants" in the README).
+  # `libre` has no proprietary code; `store_threema` is the other sensible choice.
+  FLAVOR: libre
+  GRADLE_TASK: assembleLibreRelease
+  FLAVOR_DIR: libre
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version and toolchain info
+        id: info
+        run: |
+          gradle_file=app/build.gradle.kts
+          version=$(sed -n 's/^val appVersion = "\([^"]*\)".*/\1/p' "$gradle_file")
+          suffix=$(sed -n 's/^val betaSuffix = "\([^"]*\)".*/\1/p' "$gradle_file")
+          code=$(sed -n 's/^val defaultVersionCode = \([0-9]*\).*/\1/p' "$gradle_file")
+          sdk=$(sed -n 's/^ *compileSdk = \([0-9]*\).*/\1/p' "$gradle_file")
+          build_tools=$(sed -n 's/^ *buildToolsVersion = "\([^"]*\)".*/\1/p' "$gradle_file")
+          ndk=$(sed -n 's/^ *ndkVersion = "\([^"]*\)".*/\1/p' "$gradle_file")
+          rust=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' domain/libthreema/rust-toolchain.toml)
+          for v in version code sdk build_tools ndk rust; do
+            if [ -z "${!v}" ]; then echo "Could not determine $v" >&2; exit 1; fi
+          done
+          {
+            echo "tag=v${version}${suffix}-${code}"
+            echo "name=${version}${suffix}-${code}"
+            echo "sdk=$sdk"
+            echo "build_tools=$build_tools"
+            echo "ndk=$ndk"
+            echo "rust=$rust"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this release already exists
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.info.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release ${{ steps.info.outputs.tag }} already exists, skipping build."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 21
+        if: steps.exists.outputs.exists == 'false'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        if: steps.exists.outputs.exists == 'false'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Android SDK packages
+        if: steps.exists.outputs.exists == 'false'
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install \
+            "platforms;android-${{ steps.info.outputs.sdk }}" \
+            "build-tools;${{ steps.info.outputs.build_tools }}" \
+            "ndk;${{ steps.info.outputs.ndk }}"
+
+      - name: Install protobuf compiler
+        if: steps.exists.outputs.exists == 'false'
+        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
+
+      - name: Set up Rust
+        if: steps.exists.outputs.exists == 'false'
+        run: |
+          rustup toolchain install "${{ steps.info.outputs.rust }}" --profile minimal
+          rustup default "${{ steps.info.outputs.rust }}"
+          rustup target add \
+            armv7-linux-androideabi aarch64-linux-android \
+            i686-linux-android x86_64-linux-android
+
+      # Optional: sign with your own keystore. Without these secrets the build
+      # falls back to a locally generated keystore, which changes on every run,
+      # so updates over a previous release will not install.
+      # Secrets: KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+      - name: Set up release keystore
+        if: steps.exists.outputs.exists == 'false'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning::No KEYSTORE_BASE64 secret set, APK will be signed with a throwaway keystore."
+            exit 0
+          fi
+          # The build looks for ../../keystore relative to the app directory,
+          # i.e. a `keystore` directory next to the repository checkout.
+          dir="$GITHUB_WORKSPACE/../keystore"
+          mkdir -p "$dir"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$dir/threema.keystore"
+          {
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > "$dir/threema.properties"
+
+      - name: Build APKs
+        if: steps.exists.outputs.exists == 'false'
+        run: ./gradlew --no-daemon -PbuildUniversalApk ${{ env.GRADLE_TASK }}
+
+      - name: Collect APKs
+        if: steps.exists.outputs.exists == 'false'
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/${{ env.FLAVOR_DIR }}/release/*.apk dist/
+          ls -l dist
+
+      - name: Create release
+        if: steps.exists.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.info.outputs.tag }}" dist/*.apk \
+            --target "$GITHUB_SHA" \
+            --title "Threema ${{ steps.info.outputs.name }} (${{ env.FLAVOR }})" \
+            --notes "Automated build of the \`${{ env.FLAVOR }}\` flavor from commit $GITHUB_SHA."
