@@ -12,17 +12,17 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  # Product flavor to build (see "Build Variants" in the README).
-  # `libre` has no proprietary code; `store_threema` is the other sensible choice.
-  FLAVOR: libre
-  GRADLE_TASK: assembleLibreRelease
-  FLAVOR_DIR: libre
-
 jobs:
-  build:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    outputs:
+      tag: ${{ steps.info.outputs.tag }}
+      name: ${{ steps.info.outputs.name }}
+      sdk: ${{ steps.info.outputs.sdk }}
+      build_tools: ${{ steps.info.outputs.build_tools }}
+      ndk: ${{ steps.info.outputs.ndk }}
+      rust: ${{ steps.info.outputs.rust }}
+      exists: ${{ steps.exists.outputs.exists }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,7 +40,7 @@ jobs:
           build_tools=$(sed -n 's/^ *buildToolsVersion = "\([^"]*\)".*/\1/p' "$gradle_file")
           ndk=$(sed -n 's/^ *ndkVersion = "\([^"]*\)".*/\1/p' "$gradle_file")
           rust=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' domain/libthreema/rust-toolchain.toml)
-          for v in version code sdk build_tools ndk rust; do
+          for v in version code sdk_major build_tools ndk rust; do
             if [ -z "${!v}" ]; then echo "Could not determine $v" >&2; exit 1; fi
           done
           {
@@ -64,19 +64,51 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `suffix` is appended to every APK file name.
+          - suffix: store-google
+            task: assembleStore_googleRelease
+            dir: store_google
+          - suffix: store-google-work
+            task: assembleStore_google_workRelease
+            dir: store_google_work
+          - suffix: store-threema
+            task: assembleStore_threemaRelease
+            dir: store_threema
+          - suffix: libre
+            task: assembleLibreRelease
+            dir: libre
+          - suffix: hms
+            task: assembleHmsRelease
+            dir: hms
+          - suffix: hms-work
+            task: assembleHms_workRelease
+            dir: hms_work
+          - suffix: onprem
+            task: assembleOnpremRelease
+            dir: onprem
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up JDK 21
-        if: steps.exists.outputs.exists == 'false'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Set up Gradle
-        if: steps.exists.outputs.exists == 'false'
         uses: gradle/actions/setup-gradle@v4
 
       - name: Install Android SDK packages
-        if: steps.exists.outputs.exists == 'false'
         run: |
           sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
           sdkmanager="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
@@ -89,19 +121,17 @@ jobs:
           fi
           yes | "$sdkmanager" --licenses >/dev/null || true
           "$sdkmanager" --install \
-            "platforms;android-${{ steps.info.outputs.sdk }}" \
-            "build-tools;${{ steps.info.outputs.build_tools }}" \
-            "ndk;${{ steps.info.outputs.ndk }}"
+            "platforms;android-${{ needs.prepare.outputs.sdk }}" \
+            "build-tools;${{ needs.prepare.outputs.build_tools }}" \
+            "ndk;${{ needs.prepare.outputs.ndk }}"
 
       - name: Install protobuf compiler
-        if: steps.exists.outputs.exists == 'false'
         run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
 
       - name: Set up Rust
-        if: steps.exists.outputs.exists == 'false'
         run: |
-          rustup toolchain install "${{ steps.info.outputs.rust }}" --profile minimal
-          rustup default "${{ steps.info.outputs.rust }}"
+          rustup toolchain install "${{ needs.prepare.outputs.rust }}" --profile minimal
+          rustup default "${{ needs.prepare.outputs.rust }}"
           rustup target add \
             armv7-linux-androideabi aarch64-linux-android \
             i686-linux-android x86_64-linux-android
@@ -110,8 +140,8 @@ jobs:
       # falls back to a locally generated keystore, which changes on every run,
       # so updates over a previous release will not install.
       # Secrets: KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+      # The same key is used for every flavor.
       - name: Set up release keystore
-        if: steps.exists.outputs.exists == 'false'
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -126,30 +156,58 @@ jobs:
           # i.e. a `keystore` directory next to the repository checkout.
           dir="$GITHUB_WORKSPACE/../keystore"
           mkdir -p "$dir"
-          echo "$KEYSTORE_BASE64" | base64 -d > "$dir/threema.keystore"
-          {
-            echo "storePassword=$KEYSTORE_PASSWORD"
-            echo "keyAlias=$KEY_ALIAS"
-            echo "keyPassword=$KEY_PASSWORD"
-          } > "$dir/threema.properties"
+          for name in threema threema_hms onprem; do
+            echo "$KEYSTORE_BASE64" | base64 -d > "$dir/$name.keystore"
+            {
+              echo "storePassword=$KEYSTORE_PASSWORD"
+              echo "keyAlias=$KEY_ALIAS"
+              echo "keyPassword=$KEY_PASSWORD"
+            } > "$dir/$name.properties"
+          done
 
       - name: Build APKs
-        if: steps.exists.outputs.exists == 'false'
-        run: ./gradlew --no-daemon -PbuildUniversalApk ${{ env.GRADLE_TASK }}
+        run: ./gradlew --no-daemon -PbuildUniversalApk ${{ matrix.task }}
 
-      - name: Collect APKs
-        if: steps.exists.outputs.exists == 'false'
+      - name: Rename APKs
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/${{ env.FLAVOR_DIR }}/release/*.apk dist/
+          for f in app/build/outputs/apk/${{ matrix.dir }}/release/*.apk; do
+            base=$(basename "$f" .apk)
+            cp "$f" "dist/${base}-${{ matrix.suffix }}.apk"
+          done
           ls -l dist
 
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ matrix.suffix }}
+          path: dist/*.apk
+          if-no-files-found: error
+
+  release:
+    needs: [prepare, build]
+    # Release whatever built successfully, even if one flavor failed.
+    if: ${{ !cancelled() && needs.prepare.outputs.exists == 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download APKs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: apk-*
+          path: dist
+          merge-multiple: true
+
       - name: Create release
-        if: steps.exists.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.info.outputs.tag }}" dist/*.apk \
+          if ! ls dist/*.apk >/dev/null 2>&1; then
+            echo "No APKs were built, not creating a release." >&2
+            exit 1
+          fi
+          ls -l dist
+          gh release create "${{ needs.prepare.outputs.tag }}" dist/*.apk \
+            --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Threema ${{ steps.info.outputs.name }} (${{ env.FLAVOR }})" \
-            --notes "Automated build of the \`${{ env.FLAVOR }}\` flavor from commit $GITHUB_SHA."
+            --title "Threema ${{ needs.prepare.outputs.name }}" \
+            --notes "Automated build of all flavors from commit $GITHUB_SHA. The flavor is the last part of each file name, before .apk."
